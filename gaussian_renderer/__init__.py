@@ -365,16 +365,19 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     # input('viewpoint_camera')
     c2w = np.linalg.inv(viewpoint_camera.world_view_transform.T.cpu().numpy())
     if opt.indirect:
-        specular, extra_dict = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, c2w, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth, indirect_light=indirect_light.permute(1,2,0))
+        specular, extra_dict, diffuse = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, c2w, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth, indirect_light=indirect_light.permute(1,2,0))
     else:
-        specular, extra_dict = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, c2w, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth)
+        specular, extra_dict, diffuse = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, c2w, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth)
 
-    diffuse_map = (1 - refl_strength) * base_color
+    # diffuse_map = (1 - refl_strength) * base_color
+    # final_image = base_color + specular
 
     # Integrate the final image
     # final_image = (1-refl_strength) * base_color + specular
-    final_image = base_color + specular
+    
     # refl_strength -> 0
+    diffuse_map = diffuse
+    final_image = diffuse_map + specular
 
     # Transform linear rgb to srgb with nonlinearly distribution between 0 to 1
     if srgb:

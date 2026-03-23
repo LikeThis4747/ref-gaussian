@@ -631,6 +631,8 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
             ]
             if bool(getattr(opt, "read_roughness", False)) and isinstance(getattr(viewpoint_cam, "gt_roughness", None), torch.Tensor):  #my add
                 visualization_list.insert(7, getattr(viewpoint_cam, "gt_roughness").repeat(3, 1, 1))
+            if bool(getattr(opt, "read_metallic", False)) and isinstance(getattr(viewpoint_cam, "gt_metallic", None), torch.Tensor):  #my add
+                visualization_list.insert(6, getattr(viewpoint_cam, "gt_metallic").repeat(3, 1, 1))
             if opt.indirect:
                 visualization_list += [
                     render_pkg["visibility"].repeat(3, 1, 1),
@@ -656,6 +658,8 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
             ]
             if bool(getattr(opt, "read_roughness", False)) and isinstance(getattr(viewpoint_cam, "gt_roughness", None), torch.Tensor):  #my add
                 visualization_list.insert(7, getattr(viewpoint_cam, "gt_roughness").repeat(3, 1, 1))
+            if bool(getattr(opt, "read_metallic", False)) and isinstance(getattr(viewpoint_cam, "gt_metallic", None), torch.Tensor):  #my add
+                visualization_list.insert(6, getattr(viewpoint_cam, "gt_metallic").repeat(3, 1, 1))
             if opt.indirect:
                 visualization_list += [
                     render_pkg["visibility"].repeat(3, 1, 1),

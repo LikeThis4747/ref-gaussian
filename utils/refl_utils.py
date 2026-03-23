@@ -221,7 +221,9 @@ def get_specular_color_surfel(envmap: torch.Tensor, albedo, HWK, R, T, c2w, norm
     # Compute specular color
     specular_raw = specular_light * render_alpha
     specular = specular_raw * specular_weight
-    
+
+    # my add: envmap for diffuse
+    diffuse = envmap(normal_map, mode="diffuse") * (1-refl_strength) * albedo    
 
     if indirect_light is not None:
         extra_dict = {
@@ -233,7 +235,7 @@ def get_specular_color_surfel(envmap: torch.Tensor, albedo, HWK, R, T, c2w, norm
     else:
         extra_dict = None
         
-    return specular.permute(2,0,1), extra_dict
+    return specular.permute(2,0,1), extra_dict, diffuse.permute(2,0,1)
 
 
 
