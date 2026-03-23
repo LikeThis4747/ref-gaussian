@@ -199,6 +199,9 @@ class GaussianModel:
     
     @property
     def get_refl(self): 
+        # my add: force refl_strength to 0 when requested (keeps renderer/features consistent)
+        if bool(getattr(self, "zero_metallic", False) or getattr(self, "zero_metalic", False)):
+            return torch.zeros_like(self._refl_strength)
         return self.refl_activation(self._refl_strength)
 
     @property
@@ -358,8 +361,8 @@ class GaussianModel:
         self._normal1 = nn.Parameter(torch.from_numpy(normals1).to(self._xyz.device).requires_grad_(True))
         self._normal2 = nn.Parameter(torch.from_numpy(normals2).to(self._xyz.device).requires_grad_(True))
 
-        self.env_map = EnvLight(path=None, device='cuda', max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True).cuda()
-        self.env_map_2 = EnvLight(path=None, device='cuda', max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True).cuda()
+        self.env_map = EnvLight(path=None, device='cuda', max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True, env_HDR=getattr(args, "env_HDR", False)).cuda()
+        self.env_map_2 = EnvLight(path=None, device='cuda', max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True, env_HDR=getattr(args, "env_HDR", False)).cuda()
 
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
@@ -394,6 +397,15 @@ class GaussianModel:
             {'params': [self._indirect_rest], 'lr': training_args.indirect_lr / 20.0, "name": "ind_rest"},
             {'params': [self._indirect_asg], 'lr': training_args.asg_lr, "name": "ind_asg"},
         ])
+
+        # my add: optionally freeze refl_strength (force zero via get_refl)
+        if bool(getattr(training_args, "zero_metallic", False) or getattr(training_args, "zero_metalic", False)):
+            self.zero_metallic = True
+            self.zero_metalic = True
+            self._refl_strength.requires_grad_(False)
+            for group in l:
+                if group.get("name") == "refl_strength":
+                    group["lr"] = 0.0
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
         self.xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.position_lr_init*self.spatial_lr_scale,
@@ -701,15 +713,15 @@ class GaussianModel:
             map_path2 = path.replace('.ply', '2.map')
             if os.path.exists(map_path1)  and os.path.exists(map_path2):
                 # self.env_map = CubemapEncoder(output_dim=3, resolution=128).cuda()
-                self.env_map = EnvLight(path=None, device='cuda',  max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True).cuda()
+                self.env_map = EnvLight(path=None, device='cuda',  max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True, env_HDR=getattr(args, "env_HDR", False)).cuda()
                 self.env_map.load_state_dict(torch.load(map_path1))
                 self.env_map.build_mips()
-                self.env_map_2 = EnvLight(path=None, device='cuda',  max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True).cuda()
+                self.env_map_2 = EnvLight(path=None, device='cuda',  max_res=args.envmap_max_res, min_roughness=args.envmap_min_roughness, max_roughness=args.envmap_max_roughness, trainable=True, env_HDR=getattr(args, "env_HDR", False)).cuda()
                 self.env_map_2.load_state_dict(torch.load(map_path2))
                 self.env_map_2.build_mips()
         else:
             map_path = path.replace('.ply', '.hdr')
-            self.env_map = EnvLight(path=map_path, device='cuda', trainable=True).cuda()
+            self.env_map = EnvLight(path=map_path, device='cuda', trainable=True, env_HDR=getattr(args, "env_HDR", False)).cuda()
 
 
         self._xyz = nn.Parameter(torch.tensor(xyz, dtype=torch.float, device="cuda").requires_grad_(True))

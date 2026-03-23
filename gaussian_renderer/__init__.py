@@ -23,6 +23,16 @@ import numpy as np
 
 
 
+def _tonemap_reinhard(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Tonemap HDR linear RGB to (0,1) for visualization / supervision.
+
+    Matches shadow_gaussian behavior: apply only when converting to sRGB.
+    """
+    x = torch.clamp(x, min=0.0)
+    return x / (1.0 + x + eps)
+
+
+
 def compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe):
     # 2DGS normal and regularizations
     # additional regularizations
@@ -166,14 +176,17 @@ def render_initial(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.
     surf_normal = regularizations['surf_normal']
 
     # Transform linear rgb to srgb with nonlinearly distribution between 0 to 1
-    if srgb: 
+    if srgb:
+        if (opt is not None) and bool(getattr(opt, "env_HDR", False)):
+            rendered_image = _tonemap_reinhard(rendered_image)
         rendered_image = linear_to_srgb(rendered_image)
     final_image = rendered_image + bg_color[:, None, None] * (1 - render_alpha)
 
     render_normal  = torch.nn.functional.normalize(render_normal , dim=0) 
     render_normal_cam  = torch.nn.functional.normalize(render_normal_cam , dim=0) 
     
-    final_image = torch.clamp_max(final_image, 1.0)
+    if not ((opt is not None) and bool(getattr(opt, "env_HDR", False)) and srgb):
+        final_image = torch.clamp_max(final_image, 1.0)
 
     rets =  {"render": final_image,
         "viewspace_points": means2D,
@@ -356,23 +369,31 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     else:
         specular, extra_dict = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, c2w, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth)
 
+    diffuse_map = (1 - refl_strength) * base_color
+
     # Integrate the final image
-    # final_image = (1-refl_strength) * base_color + specular 
-    final_image = base_color + specular 
+    # final_image = (1-refl_strength) * base_color + specular
+    final_image = base_color + specular
     # refl_strength -> 0
-    
+
     # Transform linear rgb to srgb with nonlinearly distribution between 0 to 1
-    if srgb: 
+    if srgb:
+        if (opt is not None) and bool(getattr(opt, "env_HDR", False)):
+            final_image = _tonemap_reinhard(final_image)
+            specular = _tonemap_reinhard(specular)
+            diffuse_map = _tonemap_reinhard(diffuse_map)
         final_image = linear_to_srgb(final_image)
         albedo = linear_to_srgb(albedo)
         specular = linear_to_srgb(specular)
+        diffuse_map = linear_to_srgb(diffuse_map)
 
 
     final_image = final_image + bg_color[:, None, None] * (1 - render_alpha)
   
     render_normal  = torch.nn.functional.normalize(render_normal , dim=0) 
     render_normal_cam  = torch.nn.functional.normalize(render_normal_cam , dim=0) 
-    final_image = torch.clamp_max(final_image, 1.0)
+    if not ((opt is not None) and bool(getattr(opt, "env_HDR", False)) and srgb):
+        final_image = torch.clamp_max(final_image, 1.0)
 
     if opt.indirect:
         indirect_color = (1-refl_strength) * base_color + extra_dict['indirect_color']
@@ -383,7 +404,7 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     # They will be excluded from value updates used in the splitting criteria.
     results =  {"render": final_image,
             "refl_strength_map": refl_strength,
-            "diffuse_map": (1-refl_strength) * base_color,
+            "diffuse_map": diffuse_map,
             "specular_map": specular,
             "base_color_map": albedo,
             "roughness_map": roughness,
@@ -585,7 +606,11 @@ def render_volume(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
 
     # Transform linear rgb to srgb with nonlinearly distribution between 0 to 1
-    if srgb: 
+    if srgb:
+        if (opt is not None) and bool(getattr(opt, "env_HDR", False)):
+            render_diffuse_color = _tonemap_reinhard(render_diffuse_color)
+            render_specular_color = _tonemap_reinhard(render_specular_color)
+            full_color = _tonemap_reinhard(full_color)
         render_diffuse_color = linear_to_srgb(render_diffuse_color)
         render_specular_color = linear_to_srgb(render_specular_color)
         full_color = linear_to_srgb(full_color)
@@ -593,7 +618,8 @@ def render_volume(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     final_image = full_color + bg_color[:, None, None] * (1 - render_alpha)
     
     render_normal  = torch.nn.functional.normalize(render_normal , dim=0) 
-    final_image = torch.clamp_max(final_image, 1.0)
+    if not ((opt is not None) and bool(getattr(opt, "env_HDR", False)) and srgb):
+        final_image = torch.clamp_max(final_image, 1.0)
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.

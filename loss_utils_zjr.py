@@ -103,17 +103,13 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     tb_dict["ssim"] = ssim_val.item()
     tb_dict["loss0"] = loss0.item()
     loss += loss0
-
-    if opt.lambda_normal_render_depth > 0 and iteration > opt.normal_loss_start:
+    
+    if opt.lambda_normal_render_depth > 0 and iteration > opt.normal_loss_start:    # 0.05 > 0 and iter >0
         surf_normal = render_pkg['surf_normal']
         loss_normal_render_depth = (1 - (rendered_normal * surf_normal).sum(dim=0))[None]
         loss_normal_render_depth = loss_normal_render_depth.mean()
         tb_dict["loss_normal_render_depth"] = loss_normal_render_depth
-
-        if iteration > 12000:
-            loss = loss + 10.0 * opt.lambda_normal_render_depth * loss_normal_render_depth
-        else:
-            loss = loss + opt.lambda_normal_render_depth * loss_normal_render_depth
+        loss = loss + opt.lambda_normal_render_depth * loss_normal_render_depth
     else:
         tb_dict["loss_normal_render_depth"] = torch.zeros_like(loss)
 
@@ -124,7 +120,7 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     else:
         tb_dict["loss_dist"] = torch.zeros_like(loss)
 
-    if opt.lambda_normal_smooth > 0 and iteration > opt.normal_smooth_from_iter and iteration < opt.normal_smooth_until_iter:
+    if opt.lambda_normal_smooth > 0 and iteration > opt.normal_smooth_from_iter and iteration < opt.normal_smooth_until_iter:  # 0.45 > 0 and iter > 0 and iter < 18000 
         loss_normal_smooth = first_order_edge_aware_loss(rendered_normal, gt_image)
         tb_dict["loss_normal_smooth"] = loss_normal_smooth.item()
         lambda_normal_smooth = opt.lambda_normal_smooth
@@ -132,7 +128,7 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     else:
         tb_dict["loss_normal_smooth"] = torch.zeros_like(loss)
     
-    if opt.lambda_depth_smooth > 0 and iteration > 3000:
+    if opt.lambda_depth_smooth > 0 and iteration > 3000:    # 0 > 0
         loss_depth_smooth = first_order_edge_aware_loss(rendered_depth, gt_image)
         tb_dict["loss_depth_smooth"] = loss_depth_smooth.item()
         lambda_depth_smooth = opt.lambda_depth_smooth

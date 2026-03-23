@@ -72,6 +72,12 @@ class ModelParams(ParamGroup):
         self.envmap_min_roughness = 0.08
         self.relight = False
 
+        # EnvLight HDR / fixed GT envmap
+        self.env_HDR = False
+        self.read_envmap = False
+        self.read_roughness = False  #my add
+        self.read_metallic = False  #my add
+
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -124,9 +130,11 @@ class OptimizationParams(ParamGroup):
         # Regularization Parameters
         self.lambda_dssim = 0.2
         self.lambda_dist = 0.0
-        self.lambda_normal_render_depth = 0.1
+        self.lambda_normal_render_depth = 0.05
         self.lambda_normal_smooth = 0.0
         self.lambda_depth_smooth = 0.0
+        self.lambda_gt_roughness = 0.1  #my add
+        self.lambda_gt_metallic = 0.1  #my add
 
 
         # initial values

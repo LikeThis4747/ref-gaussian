@@ -215,13 +215,38 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 def readCamerasFromTransforms(path, transformsfile, white_background, extension=".png"):
     cam_infos = []
 
+    def _resolve_image_path(dataset_root: str, frame_file_path: str, default_extension: str) -> tuple[str, str]:
+        """Resolve a frame's image path in a platform-robust way.
+
+        NeRF/Blender-style JSON may contain Windows separators (e.g. "train\\0000").
+        On Linux those backslashes are literal characters, so we normalize them to '/'.
+        Returns (absolute_image_path, image_stem_name).
+        """
+        if frame_file_path is None:
+            raise FileNotFoundError("Frame entry is missing 'file_path'.")
+
+        rel = str(frame_file_path).replace("\\", "/")
+        if rel.startswith("./"):
+            rel = rel[2:]
+
+        # Only append the default extension if the JSON path has no extension.
+        if Path(rel).suffix == "" and default_extension:
+            rel = rel + default_extension
+
+        abs_path = rel if os.path.isabs(rel) else os.path.join(dataset_root, rel)
+        return abs_path, Path(rel).stem
+
     with open(os.path.join(path, transformsfile)) as json_file:
         contents = json.load(json_file)
         fovx = contents["camera_angle_x"]
 
         frames = contents["frames"]
         for idx, frame in enumerate(frames):
-            cam_name = os.path.join(path, frame["file_path"] + extension)
+            image_path, image_name = _resolve_image_path(path, frame.get("file_path"), extension)
+            if not os.path.isfile(image_path):
+                raise FileNotFoundError(
+                    f"Image not found: {image_path} (frame file_path={frame.get('file_path')})"
+                )
 
             # NeRF 'transform_matrix' is a camera-to-world transform
             c2w = np.array(frame["transform_matrix"])
@@ -249,8 +274,6 @@ def readCamerasFromTransforms(path, transformsfile, white_background, extension=
             R = np.transpose(w2c[:3,:3])  # R is stored transposed due to 'glm' in CUDA code
             T = w2c[:3, 3]
 
-            image_path = os.path.join(path, cam_name)
-            image_name = Path(cam_name).stem
             image = Image.open(image_path)
 
             # im_data = np.array(image.convert("RGBA"))

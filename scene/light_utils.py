@@ -47,6 +47,33 @@ def latlong_to_cubemap(latlong_map, res, device='cuda'):
     return cubemap
 
 
+def latlong_to_cubemap2(latlong_map, res, device='cuda'):
+    """Convert a latlong map to cubemap using the direction2 convention.
+
+    direction2 convention (z-up spherical coordinates, see `get_env_direction2`):
+        (x, y, z) = (sinθ cosφ, sinθ sinφ, cosθ)
+        u = φ in [-π, π] -> [0, 1]
+        v = θ in [0, π]  -> [0, 1]
+
+    This keeps face ordering (`cube_to_dir`) unchanged and does not modify the
+    legacy `latlong_to_cubemap()` mapping.
+    """
+    cubemap = torch.zeros(6, res[0], res[1], latlong_map.shape[-1], dtype=torch.float32, device=device)
+    for s in range(6):
+        gy, gx = torch.meshgrid(
+            torch.linspace(-1.0 + 1.0 / res[0], 1.0 - 1.0 / res[0], res[0], device=device),
+            torch.linspace(-1.0 + 1.0 / res[1], 1.0 - 1.0 / res[1], res[1], device=device),
+        )
+        v = safe_normalize(cube_to_dir(s, gx, gy))
+
+        tu = torch.atan2(v[..., 1:2], v[..., 0:1]) / (2 * np.pi) + 0.5
+        tv = torch.acos(torch.clamp(v[..., 2:3], min=-1, max=1)) / np.pi
+        texcoord = torch.cat((tu, tv), dim=-1)
+
+        cubemap[s, ...] = dr.texture(latlong_map[None, ...], texcoord[None, ...], filter_mode='linear')[0]
+    return cubemap
+
+
 def cubemap_to_latlong(cubemap, res, device='cuda'):
     gy, gx = torch.meshgrid(torch.linspace( 0.0 + 1.0 / res[0], 1.0 - 1.0 / res[0], res[0], device=device), 
                             torch.linspace(-1.0 + 1.0 / res[1], 1.0 - 1.0 / res[1], res[1], device=device)

@@ -12,8 +12,6 @@ import os
 import sys
 import torch
 import torch.utils.cpp_extension
-import sys
-sys.path.append('/home/xjm/.cache/torch_extensions/py310_cu128/renderutils_plugin')
 
 from .bsdf import *
 from .loss import *
@@ -49,7 +47,35 @@ def _get_plugin():
 
     # Linker options.
     if os.name == 'posix':
-        ldflags = ['-lcuda', '-lnvrtc']
+        # Some environments (notably Conda) don't include system library paths
+        # where `libcuda.so` lives, causing `-lcuda` to fail at link time.
+        # Add a few common locations (including CUDA toolkit stubs) so the JIT
+        # extension can link successfully.
+        try:
+            from torch.utils.cpp_extension import CUDA_HOME as _CUDA_HOME
+        except Exception:
+            _CUDA_HOME = None
+
+        cuda_home = _CUDA_HOME
+        cuda_lib_dirs = [
+            '/lib/x86_64-linux-gnu',
+            '/usr/lib/x86_64-linux-gnu',
+            '/usr/lib64',
+            '/usr/lib',
+        ]
+        if cuda_home:
+            cuda_lib_dirs.extend([
+                os.path.join(cuda_home, 'lib64'),
+                os.path.join(cuda_home, 'lib64', 'stubs'),
+                os.path.join(cuda_home, 'targets', 'x86_64-linux', 'lib'),
+                os.path.join(cuda_home, 'targets', 'x86_64-linux', 'lib', 'stubs'),
+            ])
+
+        ldflags = ['-lnvrtc']
+        for lib_dir in cuda_lib_dirs:
+            if os.path.isdir(lib_dir):
+                ldflags.append(f'-L{lib_dir}')
+        ldflags += ['-lcuda']
     elif os.name == 'nt':
         ldflags = ['cuda.lib', 'advapi32.lib', 'nvrtc.lib']
 
@@ -77,11 +103,54 @@ def _get_plugin():
 
     # Compile and load.
     source_paths = [os.path.join(os.path.dirname(__file__), fn) for fn in source_files]
+
+    # In some Conda CUDA layouts, headers live under `targets/<triplet>/include`
+    # instead of `$CUDA_HOME/include`. Add both locations if present.
+    extra_include_paths = []
+    try:
+        from torch.utils.cpp_extension import CUDA_HOME as _CUDA_HOME
+    except Exception:
+        _CUDA_HOME = None
+
+    cuda_home = _CUDA_HOME
+    candidate_includes = [
+        os.path.join(cuda_home, 'include') if cuda_home else None,
+        os.path.join(cuda_home, 'targets', 'x86_64-linux', 'include') if cuda_home else None,
+    ]
+    for inc in candidate_includes:
+        if inc and os.path.isdir(inc) and inc not in extra_include_paths:
+            extra_include_paths.append(inc)
+
     torch.utils.cpp_extension.load(name='renderutils_plugin', sources=source_paths, extra_cflags=opts,
-         extra_cuda_cflags=opts, extra_ldflags=ldflags, with_cuda=True, verbose=True)
+         extra_cuda_cflags=opts, extra_ldflags=ldflags, extra_include_paths=extra_include_paths,
+         with_cuda=True, verbose=True)
 
     # Import, cache, and return the compiled module.
-    import renderutils_plugin
+    # import renderutils_plugin
+    # _cached_plugin = renderutils_plugin
+
+    try:
+        import renderutils_plugin
+    except Exception:
+        # Fallback: find the built .so (torch build dir or package dir) and load it directly
+        import importlib.util, importlib.machinery, glob
+        try:
+            build_dir = torch.utils.cpp_extension._get_build_directory('renderutils_plugin', False)
+            so_candidates = glob.glob(os.path.join(build_dir, 'renderutils_plugin*.so'))
+        except Exception:
+            so_candidates = []
+        if not so_candidates:
+            pkg_so = os.path.join(os.path.dirname(__file__), 'renderutils_plugin.so')
+            if os.path.exists(pkg_so):
+                so_candidates = [pkg_so]
+        if not so_candidates:
+            raise
+        so_path = so_candidates[0]
+        loader = importlib.machinery.ExtensionFileLoader('renderutils_plugin', so_path)
+        spec = importlib.util.spec_from_loader(loader.name, loader)
+        module = importlib.util.module_from_spec(spec)
+        loader.exec_module(module)
+        renderutils_plugin = module
     _cached_plugin = renderutils_plugin
     return _cached_plugin
 
