@@ -51,6 +51,7 @@ class EnvLight(torch.nn.Module):
         self.max_roughness = max_roughness
         self.trainable = trainable
         self.env_HDR = bool(env_HDR)
+        self.use_raw_values = False  # my add
 
         # init an empty cubemap
         self.base = torch.nn.Parameter(
@@ -71,7 +72,7 @@ class EnvLight(torch.nn.Module):
         self.build_mips()
 
 
-    def load(self, path, flip_latlong: bool = False):
+    def load(self, path, flip_latlong: bool = False, raw_values: bool = False):
         """
         Load an .hdr or .exr environment light map file and convert it to cubemap.
         """
@@ -135,7 +136,11 @@ class EnvLight(torch.nn.Module):
         if flip_latlong:
             hdr_image = np.flip(hdr_image, axis=1).copy()
 
-        if self.env_HDR:
+        self.use_raw_values = bool(raw_values)
+
+        if self.use_raw_values:
+            image = torch.from_numpy(hdr_image).to(self.device) * self.scale
+        elif self.env_HDR:
             image = torch.from_numpy(hdr_image).to(self.device) * self.scale
             image = torch.clamp(image, min=1e-6)
             image = inverse_softplus(image)
@@ -214,6 +219,8 @@ class EnvLight(torch.nn.Module):
 
         light = light.view(*prefix, -1)
         
+        if self.use_raw_values:
+            return light
         if self.env_HDR:
             return torch.nn.functional.softplus(light)
         return torch.sigmoid(light) * 10.0

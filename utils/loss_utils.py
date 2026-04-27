@@ -87,12 +87,14 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     }
     
     rendered_image = render_pkg["render"]
+    rendered_shadowfree = render_pkg.get("render_shadowfree", None)  # my add
     rendered_opacity = render_pkg["rend_alpha"]
     rendered_depth = render_pkg["surf_depth"]
     rendered_normal = render_pkg["rend_normal"]
     visibility_filter = render_pkg["visibility_filter"]
     rend_dist = render_pkg["rend_dist"]
     gt_image = viewpoint_camera.original_image.cuda()
+    gt_shadow_free = getattr(viewpoint_camera, "gt_shadow_free", None)  # my add
 
     Ll1 = l1_loss(rendered_image, gt_image)
     ssim_val = ssim(rendered_image, gt_image)
@@ -103,6 +105,16 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     tb_dict["ssim"] = ssim_val.item()
     tb_dict["loss0"] = loss0.item()
     loss += loss0
+
+    if bool(getattr(opt, "render_shadowfree", False)) and isinstance(rendered_shadowfree, torch.Tensor) and isinstance(gt_shadow_free, torch.Tensor):  # my add
+        shadowfree_l1 = l1_loss(rendered_shadowfree, gt_shadow_free)
+        shadowfree_ssim = ssim(rendered_shadowfree, gt_shadow_free)
+        shadowfree_loss0 = (1.0 - opt.lambda_dssim) * shadowfree_l1 + opt.lambda_dssim * (1.0 - shadowfree_ssim)
+        lambda_shadowfree = float(getattr(opt, "lambda_shadowfree", 0.1))
+        loss = loss + lambda_shadowfree * shadowfree_loss0
+        tb_dict["loss_shadowfree"] = shadowfree_loss0.item()
+    else:
+        tb_dict["loss_shadowfree"] = 0.0
 
     if opt.lambda_normal_render_depth > 0 and iteration > opt.normal_loss_start:
         surf_normal = render_pkg['surf_normal']

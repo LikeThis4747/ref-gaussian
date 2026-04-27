@@ -55,3 +55,41 @@ CUDA_VISIBLE_DEVICES=7  python train.py -s /nfs/508_users/disk5/wsq/ENVS/shadow_
 
 
 CUDA_VISIBLE_DEVICES=7  python train.py -s /nfs/508_users/disk5/wsq/ENVS/shadow_gaussian/data/blender/table --eval --iterations 30001 --indirect_from_iter 10000 --volume_render_until_iter 0 --initial 1 --init_until_iter 5000 -r 4 --env_HDR --read_envmap
+
+
+
+# debug
+CUDA_VISIBLE_DEVICES=7 /nfs/508_users/disk5/wsq/miniconda3/envs/ref/bin/python debug_render.py   --model_path /nfs/508_users/disk5/wsq/ENVS/ref-xjm/output/table_reflect/table_reflect-0330_1108   --iteration 30001   --all_cameras --max_cameras 60
+
+CUDA_VISIBLE_DEVICES=7 /nfs/508_users/disk5/wsq/miniconda3/envs/ref/bin/python /nfs/508_users/disk5/wsq/ENVS/ref-xjm/debug_render.py \
+  --model_path /nfs/508_users/disk5/wsq/ENVS/ref-xjm/output/table_reflect/table_reflect-0330_1108 \
+  --iteration 30000 \
+  --split train \
+  --reproduce_training_vis \
+  --mesh_iteration 28000 \
+  --all_cameras \
+  --max_cameras 60
+
+CUDA_VISIBLE_DEVICES=7 /nfs/508_users/disk5/wsq/miniconda3/envs/ref/bin/python /nfs/508_users/disk5/wsq/ENVS/ref-xjm/debug_render.py \
+  --model_path /nfs/508_users/disk5/wsq/ENVS/ref-xjm/output/table_reflect/table_reflect-0407_1422 \
+  --iteration 30000 \
+  --split train \
+  --reproduce_training_vis \
+  --mesh_iteration 28000 \
+  --all_cameras \
+  --max_cameras 60 \
+  --use_gt_normal_in_reshade
+
+  
+CUDA_VISIBLE_DEVICES=7 /nfs/508_users/disk5/wsq/miniconda3/envs/ref/bin/python /nfs/508_users/disk5/wsq/ENVS/ref-xjm/debug_render.py \
+  --model_path /nfs/508_users/disk5/wsq/ENVS/ref-xjm/output/table_reflect/table_reflect-0413_1342_changeSpecularWeightNoUsingMetallic \
+  --iteration 30000 \
+  --split train \
+  --reproduce_training_vis \
+  --mesh_iteration 28000 \
+  --all_cameras \
+  --max_cameras 60 \
+  --use_gt_normal_in_reshade
+
+
+  CUDA_VISIBLE_DEVICES=5 /nfs/508_users/disk5/wsq/miniconda3/envs/ref/bin/python train.py -s /nfs/508_users/disk5/wsq/ENVS/shadow_gaussian/data/blender/table_video --eval --iterations 30001 --indirect_from_iter 10000 --volume_render_until_iter 0 --initial 1 --init_until_iter 5000 -r 4 --env_HDR --read_envmap --read_roughness --read_metallic

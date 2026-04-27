@@ -20,16 +20,7 @@ from utils.point_utils import depth_to_normal
 from utils.refl_utils import  get_specular_color_surfel, get_full_color_volume, get_full_color_volume_indirect
 from utils.graphics_utils import linear_to_srgb, srgb_to_linear, rotation_between_z, init_predefined_omega
 import numpy as np
-
-
-
-def _tonemap_reinhard(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Tonemap HDR linear RGB to (0,1) for visualization / supervision.
-
-    Matches shadow_gaussian behavior: apply only when converting to sRGB.
-    """
-    x = torch.clamp(x, min=0.0)
-    return x / (1.0 + x + eps)
+from shadow_renderer import ShadowRenderer 
 
 
 
@@ -39,8 +30,8 @@ def compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe):
     render_alpha = allmap[1:2]
     
     # get normal map
-    render_normal_cam = allmap[2:5]
-    render_normal = (render_normal_cam.permute(1,2,0) @ (viewpoint_camera.world_view_transform[:3,:3].T)).permute(2,0,1)
+    render_normal = allmap[2:5]
+    render_normal = (render_normal.permute(1,2,0) @ (viewpoint_camera.world_view_transform[:3,:3].T)).permute(2,0,1)
     
     # get median depth map
     render_depth_median = allmap[5:6]
@@ -63,11 +54,10 @@ def compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe):
     
     # remember to multiply with accum_alpha since render_normal is unnormalized.
     surf_normal = surf_normal * render_alpha.detach()
-
+    
     return {
         'render_alpha': render_alpha,
         'render_normal': render_normal,
-        'render_normal_cam': render_normal_cam,
         'render_depth_median': render_depth_median,
         'render_depth_expected': render_depth_expected,
         'render_dist': render_dist,
@@ -168,7 +158,6 @@ def render_initial(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.
     regularizations = compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe)
     render_alpha = regularizations['render_alpha']
     render_normal = regularizations['render_normal']
-    render_normal_cam = regularizations['render_normal_cam']
     render_depth_median = regularizations['render_depth_median']
     render_depth_expected = regularizations['render_depth_expected']
     render_dist = regularizations['render_dist']
@@ -176,17 +165,9 @@ def render_initial(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.
     surf_normal = regularizations['surf_normal']
 
     # Transform linear rgb to srgb with nonlinearly distribution between 0 to 1
-    if srgb:
-        if (opt is not None) and bool(getattr(opt, "env_HDR", False)):
-            rendered_image = _tonemap_reinhard(rendered_image)
+    if srgb: 
         rendered_image = linear_to_srgb(rendered_image)
     final_image = rendered_image + bg_color[:, None, None] * (1 - render_alpha)
-
-    render_normal  = torch.nn.functional.normalize(render_normal , dim=0) 
-    render_normal_cam  = torch.nn.functional.normalize(render_normal_cam , dim=0) 
-    
-    if not ((opt is not None) and bool(getattr(opt, "env_HDR", False)) and srgb):
-        final_image = torch.clamp_max(final_image, 1.0)
 
     rets =  {"render": final_image,
         "viewspace_points": means2D,
@@ -194,10 +175,9 @@ def render_initial(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.
         "radii": radii,
         'rend_alpha': render_alpha,
         'rend_normal': render_normal,
-        'rend_normal_cam': render_normal_cam,
         'rend_dist': render_dist,
         'surf_depth': surf_depth,
-        'surf_normal': surf_normal
+        'surf_normal': surf_normal,
     }
 
     return rets
@@ -284,8 +264,7 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             sh2rgb = eval_sh(pc.active_sh_degree, shs_view, dir_pp_normalized)
             colors_precomp = torch.clamp_min(sh2rgb + 0.5, 0.0)
         else:
-            # shs = pc.get_features
-            shs = pc.get_features_and_set_rest_to_zero
+            shs = pc.get_features
     else:
         colors_precomp = override_color
 
@@ -326,6 +305,7 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         sh2indirect = eval_sh(3, shs_indirect, reflection)
         indirect = torch.clamp_min(sh2indirect, 0.0)
     
+
     contrib, rendered_image, rendered_features, radii, allmap = rasterizer(
         means3D = means3D,
         means2D = means2D,
@@ -338,6 +318,7 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         cov3D_precomp = cov3D_precomp,
     )
 
+
     base_color = rendered_image
     refl_strength = rendered_features[:1]
     roughness = rendered_features[1:2]
@@ -349,84 +330,52 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     regularizations = compute_2dgs_normal_and_regularizations(allmap, viewpoint_camera, pipe)
     render_alpha = regularizations['render_alpha']
     render_normal = regularizations['render_normal']
-    render_normal_cam = regularizations['render_normal_cam']
     render_dist = regularizations['render_dist']
     surf_depth = regularizations['surf_depth']
     surf_normal = regularizations['surf_normal']
 
-    # Use normal map computed in 2DGS pipeline to perform reflection query
-    render_normal  = torch.nn.functional.normalize(render_normal , dim=0) 
-    normal_map = render_normal.permute(1,2,0)
-    # normal_map = normal_map / render_alpha.permute(1,2,0).clamp_min(1e-6)
-    
-    # print(viewpoint_camera.R)
-    # print(viewpoint_camera.T)
-    # print(viewpoint_camera.world_view_transform)
-    # input('viewpoint_camera')
-    c2w = np.linalg.inv(viewpoint_camera.world_view_transform.T.cpu().numpy())
-    if opt.indirect:
-        specular, extra_dict, diffuse = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, c2w, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth, indirect_light=indirect_light.permute(1,2,0))
-    else:
-        specular, extra_dict, diffuse = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, c2w, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth)
 
-    # diffuse_map = (1 - refl_strength) * base_color
-    # final_image = base_color + specular
+    # Use normal map computed in 2DGS pipeline to perform reflection query
+    normal_map = render_normal.permute(1,2,0)
+    normal_map = normal_map / render_alpha.permute(1,2,0).clamp_min(1e-6)
+    
+    if opt.indirect:
+        specular, extra_dict, diffuse = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth, indirect_light=indirect_light.permute(1,2,0))
+    else:
+        specular, extra_dict, diffuse = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth)
+
+    # my shadow renderer
+    n_samples_shadow = 128  # 可放到 opt 中
+    if pc.ray_tracer is not None:
+        shadow_mask = ShadowRenderer.get_single_camera_shadow(  # 若你改成 @staticmethod
+            pc=pc,
+            env_map=pc.get_envmap,
+            HWK=viewpoint_camera.HWK,
+            R=viewpoint_camera.R,
+            T=viewpoint_camera.T,
+            surf_depth=surf_depth,
+            normal_map=normal_map,
+            render_alpha=render_alpha.permute(1,2,0),
+            n_samples=n_samples_shadow
+        )  # (H,W,1)
+    else:
+        shadow_mask = torch.ones_like(render_alpha.permute(1,2,0))  # (H,W,1)
+    shadow_mask = shadow_mask.permute(2,0,1)  # (1,H,W)
 
     # Integrate the final image
-    # final_image = (1-refl_strength) * base_color + specular
+    # final_image = (1-refl_strength) * base_color + specular 
+    # final_image = (1-refl_strength) * base_color * shadow_mask + specular 
+    final_image = diffuse + specular 
+    final_image = diffuse * shadow_mask + specular 
     
-    # my add: render diffuse visualization uses the base-color diffuse term
-    diffuse_map = (1-refl_strength) * base_color
-    final_image = diffuse_map + specular
-
-    # my add: final_image_shadowfree use for shadow-free supervision
-    render_shadowfree = None
-    base_color_render_map = None
-    shadowfree_diffuse_map = None
-    specular_shadowfree_map = None
-    if (opt is not None) and bool(getattr(opt, "render_shadowfree", False)):
-        base_color_render_map = base_color
-        # my add: shadow-free branch uses the env-light diffuse term
-        shadowfree_diffuse_map = diffuse
-        specular_shadowfree_map = extra_dict["specular_shadowfree"]  # my add
-        render_shadowfree = shadowfree_diffuse_map + specular_shadowfree_map
-
     # Transform linear rgb to srgb with nonlinearly distribution between 0 to 1
-    if srgb:
-        if (opt is not None) and bool(getattr(opt, "env_HDR", False)):
-            final_image = _tonemap_reinhard(final_image)
-            specular = _tonemap_reinhard(specular)
-            diffuse_map = _tonemap_reinhard(diffuse_map)
-            if render_shadowfree is not None:
-                render_shadowfree = _tonemap_reinhard(render_shadowfree)
-                base_color_render_map = _tonemap_reinhard(base_color_render_map)
-                shadowfree_diffuse_map = _tonemap_reinhard(shadowfree_diffuse_map)
-                specular_shadowfree_map = _tonemap_reinhard(specular_shadowfree_map)
+    if srgb: 
         final_image = linear_to_srgb(final_image)
         albedo = linear_to_srgb(albedo)
         specular = linear_to_srgb(specular)
-        diffuse_map = linear_to_srgb(diffuse_map)
-        if render_shadowfree is not None:
-            render_shadowfree = linear_to_srgb(render_shadowfree)
-            base_color_render_map = linear_to_srgb(base_color_render_map)
-            shadowfree_diffuse_map = linear_to_srgb(shadowfree_diffuse_map)
-            specular_shadowfree_map = linear_to_srgb(specular_shadowfree_map)
 
 
     final_image = final_image + bg_color[:, None, None] * (1 - render_alpha)
-    if render_shadowfree is not None:
-        render_shadowfree = render_shadowfree + bg_color[:, None, None] * (1 - render_alpha)
-  
-    render_normal  = torch.nn.functional.normalize(render_normal , dim=0) 
-    render_normal_cam  = torch.nn.functional.normalize(render_normal_cam , dim=0) 
-    if not ((opt is not None) and bool(getattr(opt, "env_HDR", False)) and srgb):
-        final_image = torch.clamp_max(final_image, 1.0)
-        if render_shadowfree is not None:
-            render_shadowfree = torch.clamp_max(render_shadowfree, 1.0)
-            base_color_render_map = torch.clamp_max(base_color_render_map, 1.0)
-            shadowfree_diffuse_map = torch.clamp_max(shadowfree_diffuse_map, 1.0)
-            specular_shadowfree_map = torch.clamp_max(specular_shadowfree_map, 1.0)
-
     if opt.indirect:
         indirect_color = (1-refl_strength) * base_color + extra_dict['indirect_color']
         indirect_color = indirect_color + bg_color[:, None, None] * (1 - render_alpha)
@@ -436,10 +385,10 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     # They will be excluded from value updates used in the splitting criteria.
     results =  {"render": final_image,
             "refl_strength_map": refl_strength,
-            "diffuse_map": diffuse_map,
+            # "diffuse_map": (1-refl_strength) * base_color,
+            "diffuse_map": diffuse,
             "specular_map": specular,
-            "base_color_map": base_color,  # my add
-            "albedo_map": albedo,  # my add
+            "base_color_map": albedo,
             "roughness_map": roughness,
             "viewspace_points": means2D,
             "visibility_filter" : radii > 0,
@@ -447,19 +396,11 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
             ## normal, accum alpha, dist, depth map
             'rend_alpha': render_alpha,
             'rend_normal': render_normal,
-            'rend_normal_cam': render_normal_cam,
             'rend_dist': render_dist,
             'surf_depth': surf_depth,
-            'surf_normal': surf_normal
+            'surf_normal': surf_normal,
+            "shadow_mask": shadow_mask
     }
-
-    if render_shadowfree is not None:
-        results.update({  # my add
-            "render_shadowfree": render_shadowfree,
-            "base_color_render_map": base_color_render_map,
-            "shadowfree_diffuse_map": shadowfree_diffuse_map,
-            "specular_shadowfree_map": specular_shadowfree_map,
-        })
     
     if opt.indirect:
         results.update(extra_dict)
@@ -647,23 +588,15 @@ def render_volume(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
 
     # Transform linear rgb to srgb with nonlinearly distribution between 0 to 1
-    if srgb:
-        # if (opt is not None) and bool(getattr(opt, "env_HDR", False)):
-        #     render_diffuse_color = _tonemap_reinhard(render_diffuse_color)
-        #     render_specular_color = _tonemap_reinhard(render_specular_color)
-        #     full_color = _tonemap_reinhard(full_color)
-        render_diffuse_color = torch.clamp(render_diffuse_color, 0.0, 1.0)
-        render_specular_color = torch.clamp(render_specular_color, 0.0, 1.0)
-        full_color = torch.clamp(full_color, 0.0, 1.0)
+    if srgb: 
         render_diffuse_color = linear_to_srgb(render_diffuse_color)
         render_specular_color = linear_to_srgb(render_specular_color)
         full_color = linear_to_srgb(full_color)
 
     final_image = full_color + bg_color[:, None, None] * (1 - render_alpha)
     
-    render_normal  = torch.nn.functional.normalize(render_normal , dim=0) 
-    if not ((opt is not None) and bool(getattr(opt, "env_HDR", False)) and srgb):
-        final_image = torch.clamp_max(final_image, 1.0)
+
+
 
     # Those Gaussians that were frustum culled or had a radius of 0 were not visible.
     # They will be excluded from value updates used in the splitting criteria.

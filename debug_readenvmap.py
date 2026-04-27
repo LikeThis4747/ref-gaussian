@@ -11,7 +11,6 @@ import imageio
 from scene.light import EnvLight, inverse_softplus
 
 
-# my add: write logs to txt
 class _Tee:
     def __init__(self, *streams: TextIO):
         self._streams = streams
@@ -225,7 +224,7 @@ def main() -> int:
     parser.add_argument(
         "--exr_path",
         type=str,
-        default="/nfs/508_users/disk5/wsq/ENVS/shadow_gaussian/data/blender/diffuse/envmap/kloofendal_48d_partly_cloudy_puresky_2k.exr",
+        default="/nfs/508_users/disk5/wsq/ENVS/shadow_gaussian/data/blender/diffuse/envmap/kloofendal_48d_partly_cloudy_puresky_2k_x0.3000.exr",
         help="Path to a single latlong HDR EXR envmap.",
     )
     parser.add_argument(
@@ -258,7 +257,6 @@ def main() -> int:
         out_dir = os.path.join("./output", f"debug_readenvmap_{base}")
     os.makedirs(out_dir, exist_ok=True)
 
-    # my add: write logs to txt
     log_path = os.path.join(out_dir, "debug_readenvmap_log.txt")
     _enable_log_tee(log_path)
     print("=" * 80)
@@ -266,6 +264,10 @@ def main() -> int:
     print(f"log_path={log_path}")
     print(f"exr_path={exr_path}")
     print(f"out_dir={out_dir}")
+    print(f"latlong_mode={args.latlong_mode}")
+    print(f"scale={args.scale}")
+    print(f"max_res={args.max_res}")
+    print(f"H={args.H}")
     print("=" * 80)
 
     # --- A) EXR direct read (no cubemap conversion) ---
@@ -362,6 +364,10 @@ def main() -> int:
     _save_png(os.path.join(out_dir, "resample_env2_direction2_tonemap.png"), _tonemap_env_for_vis(env2, exposure=args.exposure))
     _save_png(os.path.join(out_dir, "resample_diffuse_direction2_tonemap.png"), _tonemap_env_for_vis(diffuse_linear, exposure=args.exposure))
 
+    # Explicit mode-named outputs for quick comparison with roughness sampling
+    _save_png(os.path.join(out_dir, "sample_mode_pure_env_direction2_tonemap.png"), _tonemap_env_for_vis(env2, exposure=args.exposure))
+    _save_png(os.path.join(out_dir, "sample_mode_diffuse_direction2_tonemap.png"), _tonemap_env_for_vis(diffuse_linear, exposure=args.exposure))
+
     for roughness, sampled in sampled_spec.items():
         _save_png(
             os.path.join(out_dir, f"resample_spec_direction2_r{roughness:.2f}_tonemap.png"),
@@ -369,8 +375,10 @@ def main() -> int:
         )
 
     print(f"\n[OK] wrote outputs to: {out_dir}")
+    print(f"- Log file:   {log_path}")
     print(f"- EXR direct: exr_raw_tonemap.png, exr_flipped_tonemap.png")
     print(f"- Resampled:  resample_env1_direction1_tonemap.png, resample_env2_direction2_tonemap.png")
+    print(f"- Mode maps:  sample_mode_pure_env_direction2_tonemap.png, sample_mode_diffuse_direction2_tonemap.png")
     return 0
 
 

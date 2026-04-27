@@ -11,6 +11,7 @@
 
 import os
 import glob
+import json
 import torch
 import open3d as o3d
 from random import randint
@@ -39,6 +40,141 @@ except ImportError:
 import cv2
 
 
+def _mesh_bbox_stats(vertices: np.ndarray):
+    if vertices.size == 0:
+        return None, None
+    return vertices.min(axis=0).tolist(), vertices.max(axis=0).tolist()
+
+
+def _mesh_diff_stats(a: np.ndarray, b: np.ndarray):
+    if a.shape != b.shape:
+        return {
+            "shape_match": False,
+            "shape_a": list(a.shape),
+            "shape_b": list(b.shape),
+        }
+    diff = np.abs(a - b)
+    return {
+        "shape_match": True,
+        "shape": list(a.shape),
+        "mean_abs": float(diff.mean()) if diff.size else 0.0,
+        "max_abs": float(diff.max()) if diff.size else 0.0,
+        "allclose_1e-6": bool(np.allclose(a, b, atol=1e-6)),
+        "all_equal": bool(np.array_equal(a, b)),
+    }
+
+
+def _vis_tensor(x: torch.Tensor):
+    if x.dim() == 2:
+        x = x.unsqueeze(0)
+    if x.shape[0] == 1:
+        x = x.repeat(3, 1, 1)
+    return torch.clamp(x.detach(), 0.0, 1.0)
+
+
+@torch.no_grad()
+def save_mesh_roundtrip_diagnostics(model_path, iteration, viewpoint_cam, gaussians, mesh, ply_path, render_fn, pipe, background, opt):
+    # my add: compare in-memory mesh vs saved-and-reloaded mesh for ray-tracer diagnosis
+    diag_dir = os.path.join(model_path, "mesh_roundtrip_diagnostics", f"iter_{iteration:06d}")
+    os.makedirs(diag_dir, exist_ok=True)
+
+    mesh_disk = o3d.io.read_triangle_mesh(ply_path)
+    mem_vertices = np.asarray(mesh.vertices).astype(np.float32)
+    mem_faces = np.asarray(mesh.triangles).astype(np.int32)
+    disk_vertices = np.asarray(mesh_disk.vertices).astype(np.float32)
+    disk_faces = np.asarray(mesh_disk.triangles).astype(np.int32)
+
+    mem_bbox_min, mem_bbox_max = _mesh_bbox_stats(mem_vertices)
+    disk_bbox_min, disk_bbox_max = _mesh_bbox_stats(disk_vertices)
+    stats = {
+        "iteration": int(iteration),
+        "image_name": getattr(viewpoint_cam, "image_name", None),
+        "ply_path": ply_path,
+        "mesh_in_memory": {
+            "vertex_count": int(mem_vertices.shape[0]),
+            "triangle_count": int(mem_faces.shape[0]),
+            "bbox_min": mem_bbox_min,
+            "bbox_max": mem_bbox_max,
+        },
+        "mesh_reloaded": {
+            "vertex_count": int(disk_vertices.shape[0]),
+            "triangle_count": int(disk_faces.shape[0]),
+            "bbox_min": disk_bbox_min,
+            "bbox_max": disk_bbox_max,
+        },
+        "vertex_diff": _mesh_diff_stats(mem_vertices, disk_vertices),
+        "triangle_diff": _mesh_diff_stats(mem_faces, disk_faces),
+    }
+
+    gaussians.update_mesh(mesh)
+    render_mem = render_fn(viewpoint_cam, gaussians, pipe, background, srgb=opt.srgb, opt=opt)
+    gaussians.load_mesh_from_ply(model_path, iteration)
+    render_disk = render_fn(viewpoint_cam, gaussians, pipe, background, srgb=opt.srgb, opt=opt)
+    gaussians.update_mesh(mesh)
+
+    compare_keys = [
+        ("render", "render"),
+        ("diffuse", "diffuse_map"),
+        ("specular", "specular_map"),
+    ]
+    if "visibility" in render_mem and "visibility" in render_disk:
+        compare_keys.append(("visibility", "visibility"))
+    if "direct_light" in render_mem and "direct_light" in render_disk:
+        compare_keys.append(("direct_light", "direct_light"))
+    if "indirect_light" in render_mem and "indirect_light" in render_disk:
+        compare_keys.append(("indirect_light", "indirect_light"))
+
+    render_metrics = {}
+    grid_rows = [
+        _vis_tensor(viewpoint_cam.original_image.cuda()),
+        _vis_tensor(render_mem["render"]),
+        _vis_tensor(render_disk["render"]),
+        _vis_tensor(torch.abs(render_mem["render"] - render_disk["render"])),
+    ]
+    layout_lines = [
+        "columns: GT | in_memory_mesh | reloaded_mesh | abs_diff",
+        "row1: render",
+    ]
+
+    render_abs = torch.abs(render_mem["render"] - render_disk["render"])
+    render_metrics["render"] = {
+        "mae": float(render_abs.mean().item()),
+        "max_abs": float(render_abs.max().item()),
+    }
+
+    for row_idx, (row_name, key) in enumerate(compare_keys[1:], start=2):
+        mem_tensor = render_mem[key]
+        disk_tensor = render_disk[key]
+        abs_diff = torch.abs(mem_tensor - disk_tensor)
+        render_metrics[row_name] = {
+            "mae": float(abs_diff.mean().item()),
+            "max_abs": float(abs_diff.max().item()),
+        }
+        if key == "visibility":
+            render_metrics[row_name]["binary_mismatch_ratio"] = float(
+                ((mem_tensor > 0.5) != (disk_tensor > 0.5)).float().mean().item()
+            )
+        zero_panel = torch.zeros_like(_vis_tensor(mem_tensor))
+        grid_rows.extend([
+            zero_panel,
+            _vis_tensor(mem_tensor),
+            _vis_tensor(disk_tensor),
+            _vis_tensor(abs_diff),
+        ])
+        layout_lines.append(f"row{row_idx}: {row_name}")
+
+    stats["render_diff"] = render_metrics
+
+    grid = make_grid(torch.stack(grid_rows, dim=0), nrow=4, padding=6)
+    image_name = getattr(viewpoint_cam, "image_name", f"iter_{iteration:06d}")
+    save_image(grid, os.path.join(diag_dir, f"{image_name}_roundtrip.png"))
+
+    with open(os.path.join(diag_dir, f"{image_name}_roundtrip_layout.txt"), "w") as f:
+        f.write("\n".join(layout_lines) + "\n")
+    with open(os.path.join(diag_dir, f"{image_name}_roundtrip.json"), "w") as f:
+        json.dump(stats, f, indent=2)
+
+    print(f"[MESH_DIAG] Saved roundtrip diagnostics for {image_name} at iteration {iteration} to {diag_dir}")
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, model_path, debug_from=None):
@@ -50,6 +186,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         setattr(opt, "env_HDR", bool(getattr(dataset, "env_HDR", False)))
     if not hasattr(opt, "read_envmap"):
         setattr(opt, "read_envmap", bool(getattr(dataset, "read_envmap", False)))
+    if not hasattr(opt, "render_shadowfree"):
+        setattr(opt, "render_shadowfree", bool(getattr(dataset, "render_shadowfree", False)))  # my add
     if bool(getattr(opt, "read_envmap", False)) and not bool(getattr(opt, "env_HDR", False)):
         raise ValueError("--read_envmap must be used together with --env_HDR")
 
@@ -83,12 +221,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         env_path = _find_single_gt_exr_envmap()
         # Load GT latlong EXR, flip horizontally to match the convention used in shadow_gaussian.
         setattr(gaussians.get_envmap, "latlong_mode", "direction2")
-        gaussians.get_envmap.load(env_path, flip_latlong=True)
+        gaussians.get_envmap.load(env_path, flip_latlong=True, raw_values=True)
         gaussians.get_envmap.build_mips()
         gaussians.get_envmap.base.requires_grad_(False)
 
         setattr(gaussians.get_envmap_2, "latlong_mode", "direction2")
-        gaussians.get_envmap_2.load(env_path, flip_latlong=True)
+        gaussians.get_envmap_2.load(env_path, flip_latlong=True, raw_values=True)
         gaussians.get_envmap_2.build_mips()
         gaussians.get_envmap_2.base.requires_grad_(False)
 
@@ -127,6 +265,35 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             print(f"[ERROR] Failed to load {cache_attr} {gt_path}: {e}")
             setattr(viewpoint_cam, cache_attr, False)  #my add
             return None
+
+    def _load_gt_rgb_image_required(viewpoint_cam, folder_name, cache_attr):  # my add
+        cached = getattr(viewpoint_cam, cache_attr, None)
+        if isinstance(cached, torch.Tensor):
+            return cached
+
+        folder_path = os.path.join(dataset.source_path, folder_name)
+        if not os.path.isdir(folder_path):
+            raise FileNotFoundError(f"{folder_name} directory not found: {folder_path}")
+
+        gt_path = os.path.join(folder_path, f"{viewpoint_cam.image_name}.png")
+        if not os.path.exists(gt_path):
+            raise FileNotFoundError(f"{folder_name} GT not found for {viewpoint_cam.image_name}: {gt_path}")
+
+        from PIL import Image
+        import torchvision.transforms.functional as tf
+
+        with Image.open(gt_path) as pil_img:
+            if pil_img.size != (viewpoint_cam.image_width, viewpoint_cam.image_height):
+                pil_img = pil_img.resize((viewpoint_cam.image_width, viewpoint_cam.image_height), Image.BILINEAR)
+
+            gt_map = tf.to_tensor(pil_img).cuda()
+            if gt_map.shape[0] == 1:
+                gt_map = gt_map.repeat(3, 1, 1)
+            elif gt_map.shape[0] > 3:
+                gt_map = gt_map[:3, ...]
+            gt_map = gt_map.float().clamp(0.0, 1.0)
+            setattr(viewpoint_cam, cache_attr, gt_map)
+            return gt_map
 
     def _as_single_channel_map(x):  #my add
         if not isinstance(x, torch.Tensor):
@@ -247,6 +414,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         render = select_render_method(iteration, opt, initial_stage)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, srgb=opt.srgb, opt=opt)
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+
+        if bool(getattr(opt, "render_shadowfree", False)) and render is render_surfel:  # my add
+            _load_gt_rgb_image_required(viewpoint_cam, "shadow_free", "gt_shadow_free")
 
         gt_image = viewpoint_cam.original_image.cuda()
         # print(f"gt image shape: {gt_image.shape}")
@@ -545,7 +715,25 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     mesh = post_process_mesh(mesh, cluster_to_keep=opt.num_cluster)
                     ply_path = os.path.join(model_path,f'test_{iteration:06d}.ply')
                     o3d.io.write_triangle_mesh(ply_path, mesh)
+                    if bool(getattr(opt, "mesh_roundtrip_diagnostic", False)):
+                        # my add: save diagnostics before changing the final mesh source used by training
+                        save_mesh_roundtrip_diagnostics(
+                            model_path,
+                            iteration,
+                            viewpoint_cam,
+                            gaussians,
+                            mesh,
+                            ply_path,
+                            render,
+                            pipe,
+                            background,
+                            opt,
+                        )
                     gaussians.update_mesh(mesh)
+                    # my add: rebuild ray_tracer from the exact saved mesh file so
+                    # training and debug_render use the same mesh source.
+                    # gaussians.load_mesh_from_ply(model_path, iteration)
+                    # print(f"[MESH] Reloaded saved mesh for ray tracer from {ply_path}")
 
             if iteration < TOT_ITER:
                 gaussians.optimizer.step()
@@ -666,6 +854,20 @@ def save_training_vis(viewpoint_cam, gaussians, background, render_fn, pipe, opt
                     render_pkg["direct_light"],
                     render_pkg["indirect_light"],
                 ]
+
+        if bool(getattr(opt, "render_shadowfree", False)) and isinstance(getattr(viewpoint_cam, "gt_shadow_free", None), torch.Tensor) and isinstance(render_pkg.get("render_shadowfree", None), torch.Tensor):  # my add
+            visualization_list = [  # my add
+                visualization_list[0],
+                visualization_list[1],
+                render_pkg["base_color_map"],
+                render_pkg["diffuse_map"],
+                getattr(viewpoint_cam, "gt_shadow_free"),
+                render_pkg["render_shadowfree"],
+                render_pkg["albedo_map"],
+                render_pkg["shadowfree_diffuse_map"],
+                render_pkg["specular_shadowfree_map"],
+                *visualization_list[4:],
+            ]
   
 
         grid = torch.stack(visualization_list, dim=0)
@@ -836,6 +1038,7 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     parser.add_argument("--zero_metallic", action='store_true', default=False)  #my add
     parser.add_argument("--zero_metalic", action='store_true', default=False, help="(deprecated) use --zero_metallic")  #my add
+    parser.add_argument("--mesh_roundtrip_diagnostic", action='store_true', default=False)  #my add
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     args.test_iterations = args.test_iterations + [i for i in range(10000, args.iterations+1, 5000)]
@@ -873,7 +1076,9 @@ if __name__ == "__main__":
     opt.read_envmap = bool(getattr(args, "read_envmap", getattr(dataset, "read_envmap", False)))
     opt.read_roughness = bool(getattr(args, "read_roughness", False))  #my add
     opt.read_metallic = bool(getattr(args, "read_metallic", False))  #my add
+    opt.render_shadowfree = bool(getattr(args, "render_shadowfree", getattr(dataset, "render_shadowfree", False)))  # my add
     opt.zero_metallic = bool(getattr(args, "zero_metallic", False) or getattr(args, "zero_metalic", False))  #my add
+    opt.mesh_roundtrip_diagnostic = bool(getattr(args, "mesh_roundtrip_diagnostic", False))  #my add
 
     training(dataset, opt, pipe, args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.model_path)
 

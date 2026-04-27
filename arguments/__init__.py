@@ -77,6 +77,7 @@ class ModelParams(ParamGroup):
         self.read_envmap = False
         self.read_roughness = False  #my add
         self.read_metallic = False  #my add
+        self.render_shadowfree = False  # my add
 
         super().__init__(parser, "Loading Parameters", sentinel)
 
@@ -135,6 +136,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_depth_smooth = 0.0
         self.lambda_gt_roughness = 0.1  #my add
         self.lambda_gt_metallic = 0.1  #my add
+        self.lambda_shadowfree = 0.1  # my add
 
 
         # initial values
