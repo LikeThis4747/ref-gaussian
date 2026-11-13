@@ -184,7 +184,12 @@ def render_initial(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.
 
 
 
-def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, srgb = False, opt=None):
+# [UPSTREAM Ref-Gaussian] af7691a gaussian_renderer/__init__.py::render_surfel
+# [REF-MV MODIFICATION] Expose the original rasterization/shading boundary so
+# joint rendering can reuse one rasterization without changing either formula.
+def rasterize_surfel(viewpoint_camera, pc : GaussianModel, pipe,
+                     bg_color : torch.Tensor, scaling_modifier=1.0,
+                     override_color=None, gaussian_feature=None):
 
  
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
@@ -305,12 +310,29 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
         indirect = torch.clamp_min(sh2indirect, 0.0)
     
 
+    # [UPSTREAM Ref-Gaussian] af7691a gaussian_renderer/__init__.py::render_surfel
+    # [REF-MV MODIFICATION] Reuse the upstream generic feature rasterization
+    # path for the per-Gaussian conditioning feature.
+    feature_parts = [refl, roughness, ori_color, indirect]
+    if gaussian_feature is not None:
+        if gaussian_feature.ndim != 2 or gaussian_feature.shape[0] != pc.get_xyz.shape[0]:
+            raise ValueError(
+                "gaussian_feature must have shape [num_gaussians, feature_dim], "
+                f"got {tuple(gaussian_feature.shape)}"
+            )
+        if 8 + gaussian_feature.shape[1] > 24:
+            raise ValueError(
+                "Rasterized feature count exceeds the CUDA MAX_FEATURES=24 limit: "
+                f"8 + {gaussian_feature.shape[1]}"
+            )
+        feature_parts.append(gaussian_feature)
+
     contrib, rendered_image, rendered_features, radii, allmap = rasterizer(
         means3D = means3D,
         means2D = means2D,
         shs = shs,
         colors_precomp = colors_precomp,
-        features = torch.cat((refl, roughness, ori_color, indirect), dim=-1),
+        features = torch.cat(feature_parts, dim=-1),
         opacities = opacity,
         scales = scales,
         rotations = rotations,
@@ -318,7 +340,31 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     )
 
 
-    base_color = rendered_image
+    rasterized = {
+        "base_color": rendered_image,
+        "rendered_features": rendered_features,
+        "allmap": allmap,
+        "radii": radii,
+        "viewspace_points": means2D,
+    }
+    if gaussian_feature is not None:
+        feature_dim = gaussian_feature.shape[1]
+        rasterized["gs_feature"] = rendered_features[8:8 + feature_dim]
+    return rasterized
+
+
+def shade_surfel(viewpoint_camera, pc : GaussianModel, pipe,
+                 bg_color : torch.Tensor, rasterized, srgb=False, opt=None,
+                 material_maps=None):
+    imH = int(viewpoint_camera.image_height)
+    imW = int(viewpoint_camera.image_width)
+
+    base_color = rasterized["base_color"]
+    rendered_features = rasterized["rendered_features"]
+    allmap = rasterized["allmap"]
+    radii = rasterized["radii"]
+    means2D = rasterized["viewspace_points"]
+
     refl_strength = rendered_features[:1]
     roughness = rendered_features[1:2]
     albedo = rendered_features[2:5]
@@ -337,6 +383,27 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
     # Use normal map computed in 2DGS pipeline to perform reflection query
     normal_map = render_normal.permute(1,2,0)
     normal_map = normal_map / render_alpha.permute(1,2,0).clamp_min(1e-6)
+
+    if material_maps is not None:
+        expected = {
+            "albedo": (imH, imW, 3),
+            "metallic": (imH, imW, 1),
+            "roughness": (imH, imW, 1),
+        }
+        if set(material_maps) != set(expected):
+            raise ValueError(
+                f"material_maps must contain exactly {tuple(expected)}, "
+                f"got {tuple(material_maps)}"
+            )
+        for name, shape in expected.items():
+            if tuple(material_maps[name].shape) != shape:
+                raise ValueError(
+                    f"material_maps[{name!r}] must have shape {shape}, "
+                    f"got {tuple(material_maps[name].shape)}"
+                )
+        albedo = material_maps["albedo"].permute(2, 0, 1).to(base_color)
+        refl_strength = material_maps["metallic"].permute(2, 0, 1).to(base_color)
+        roughness = material_maps["roughness"].permute(2, 0, 1).to(base_color)
     
     if opt.indirect:
         specular, extra_dict = get_specular_color_surfel(pc.get_envmap, albedo.permute(1,2,0), viewpoint_camera.HWK, viewpoint_camera.R, viewpoint_camera.T, normal_map, render_alpha.permute(1,2,0), refl_strength=refl_strength.permute(1,2,0), roughness=roughness.permute(1,2,0), pc=pc, surf_depth=surf_depth, indirect_light=indirect_light.permute(1,2,0))
@@ -384,6 +451,30 @@ def render_surfel(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.T
 
 
     return results
+
+
+def render_surfel(viewpoint_camera, pc : GaussianModel, pipe,
+                  bg_color : torch.Tensor, scaling_modifier=1.0,
+                  override_color=None, srgb=False, opt=None,
+                  material_maps=None):
+    rasterized = rasterize_surfel(
+        viewpoint_camera,
+        pc,
+        pipe,
+        bg_color,
+        scaling_modifier=scaling_modifier,
+        override_color=override_color,
+    )
+    return shade_surfel(
+        viewpoint_camera,
+        pc,
+        pipe,
+        bg_color,
+        rasterized,
+        srgb=srgb,
+        opt=opt,
+        material_maps=material_maps,
+    )
 
 
 

@@ -13,7 +13,7 @@ from scene.cameras import Camera
 import numpy as np
 import os, cv2, torch
 from utils.general_utils import PILtoTorch
-from utils.graphics_utils import fov2focal
+from utils.graphics_utils import fov2focal, focal2fov
 
 WARNED = False
 
@@ -39,11 +39,10 @@ def loadCam(args, id, cam_info, resolution_scale):
 
         scale = float(global_down) * float(resolution_scale)
         resolution = (int(orig_w / scale), int(orig_h / scale))
-    HWK = None  # #
+    K = None
     if cam_info.K is not None:
         K = cam_info.K.copy()
         K[:2] = K[:2] / scale
-        HWK = (resolution[1], resolution[0], K)
 
     if len(cam_info.image.split()) > 3:
         import torch
@@ -54,6 +53,29 @@ def loadCam(args, id, cam_info, resolution_scale):
         resized_image_rgb = PILtoTorch(cam_info.image, resolution)
         loaded_mask = None
         gt_image = resized_image_rgb
+
+    # [UPSTREAM Ref-Gaussian] af7691a utils/camera_utils.py::loadCam
+    # [REF-MV MODIFICATION] Crop only after Ref's original -r resize so DINO's
+    # 14x14 patch embedding and the camera projection use one shared size.
+    joint_patch_size = getattr(args, "joint_patch_size", 0)
+    if joint_patch_size:
+        width = (resolution[0] // joint_patch_size) * joint_patch_size
+        height = (resolution[1] // joint_patch_size) * joint_patch_size
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                f"Camera {cam_info.image_name} becomes empty when cropped to "
+                f"a multiple of patch size {joint_patch_size}: {resolution}"
+            )
+        gt_image = gt_image[:, :height, :width]
+        if loaded_mask is not None:
+            loaded_mask = loaded_mask[:, :height, :width]
+        resolution = (width, height)
+
+    HWK = None if K is None else (resolution[1], resolution[0], K)
+    fov_x, fov_y = cam_info.FovX, cam_info.FovY
+    if joint_patch_size and K is not None:
+        fov_x = focal2fov(K[0, 0], resolution[0])
+        fov_y = focal2fov(K[1, 1], resolution[1])
     # #
     refl_path = os.path.join(
         os.path.dirname(os.path.dirname(cam_info.image_path)), 'image_msk')
@@ -66,7 +88,7 @@ def loadCam(args, id, cam_info, resolution_scale):
     else: refl_msk = None
 
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
-                  FoVx=cam_info.FovX, FoVy=cam_info.FovY, 
+                  FoVx=fov_x, FoVy=fov_y,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, 
                   data_device=args.data_device, HWK=HWK, gt_refl_mask=refl_msk)

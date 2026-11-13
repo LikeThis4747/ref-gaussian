@@ -144,7 +144,10 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
-        self.densify_until_iter = 25000 
+        # [UPSTREAM Ref-Gaussian] af7691a default: 25000
+        # [REF-MV MODIFICATION] The standard workflow loads the completed Ref
+        # iteration 20000 and keeps its Gaussian topology fixed during joint training.
+        self.densify_until_iter = 20000
 
         # # Extra settings
         self.densify_grad_threshold = 0.0002

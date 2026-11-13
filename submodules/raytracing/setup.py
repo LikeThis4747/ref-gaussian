@@ -35,7 +35,7 @@ def find_eigen(min_ver=(3, 3, 0)):
                 elif line.startswith(MAJOR_VER_STR):
                     major_ver = int(line[len(MAJOR_VER_STR):])
                 elif line.startswith(MINOR_VER_STR):
-                    minor_ver = int(line[len(MAJOR_VER_STR):])
+                    minor_ver = int(line[len(MINOR_VER_STR):])
             if not world_ver or not major_ver or not minor_ver:
                 print('Failed to parse macros file', macros_path)
             else:
@@ -81,14 +81,14 @@ def find_eigen(min_ver=(3, 3, 0)):
     return eigen_path
 
 nvcc_flags = [
-    '-O3', '-std=c++14',
+    '-O3', '-std=c++17',
     "--expt-extended-lambda",
 	"--expt-relaxed-constexpr",
     '-U__CUDA_NO_HALF_OPERATORS__', '-U__CUDA_NO_HALF_CONVERSIONS__', '-U__CUDA_NO_HALF2_OPERATORS__',
 ]
 
 if os.name == "posix":
-    c_flags = ['-O3', '-std=c++14']
+    c_flags = ['-O3', '-std=c++17']
 elif os.name == "nt":
     c_flags = ['/O2', '/std:c++17']
 

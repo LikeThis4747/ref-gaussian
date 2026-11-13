@@ -1,8 +1,16 @@
 *.pyc
+*.so
+*.o
+*.a
+*.dylib
+*.dll
+*.pyd
 .vscode
 output
 output_1
 build
+**/build/
+**/eigen-*/
 data
 *.ply
 **/PKG-INFO
@@ -14,5 +22,4 @@ eval
 **/tmp
 snapshot_bw.dump
 train_sh
-
 

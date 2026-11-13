@@ -94,6 +94,11 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        # [UPSTREAM Ref-Gaussian] af7691a scene/gaussian_model.py::GaussianModel
+        # [REF-MV MODIFICATION] Joint conditioning is opt-in and is stored
+        # separately from the upstream PLY/capture formats.
+        self._gs_feature = None
+        self.gs_feature_dim = 0
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
@@ -196,6 +201,39 @@ class GaussianModel:
     @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
+
+    @property
+    def get_gs_feature(self):
+        if self._gs_feature is None:
+            raise RuntimeError("gs_feature is not initialized")
+        return self._gs_feature
+
+    def initialize_gs_feature(self, feature_dim, lr, initial_value=None):
+        if self._gs_feature is not None:
+            raise RuntimeError("gs_feature is already initialized")
+        if self.optimizer is None:
+            raise RuntimeError("training_setup() must run before gs_feature initialization")
+        if feature_dim <= 0:
+            raise ValueError(f"feature_dim must be positive, got {feature_dim}")
+
+        expected_shape = (self.get_xyz.shape[0], feature_dim)
+        if initial_value is None:
+            value = torch.zeros(expected_shape, device=self.get_xyz.device, dtype=self.get_xyz.dtype)
+        else:
+            if tuple(initial_value.shape) != expected_shape:
+                raise ValueError(
+                    f"gs_feature shape mismatch: expected {expected_shape}, "
+                    f"got {tuple(initial_value.shape)}"
+                )
+            value = initial_value.to(device=self.get_xyz.device, dtype=self.get_xyz.dtype)
+
+        self._gs_feature = nn.Parameter(value.detach().clone().requires_grad_(True))
+        self.gs_feature_dim = feature_dim
+        self.optimizer.add_param_group({
+            "params": [self._gs_feature],
+            "lr": lr,
+            "name": "gs_feature",
+        })
     
     @property
     def get_refl(self): 
@@ -779,6 +817,8 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        if self._gs_feature is not None:
+            self._gs_feature = optimizable_tensors["gs_feature"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -808,7 +848,7 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_refl_strength, new_metalness, new_roughness, new_ori_color, new_diffuse_color, new_features_dc, new_features_rest, new_indirect_dc, new_indirect_asg, new_indirect_rest, new_opacities, new_scaling, new_rotation, new_normal1, new_normal2):
+    def densification_postfix(self, new_xyz, new_refl_strength, new_metalness, new_roughness, new_ori_color, new_diffuse_color, new_features_dc, new_features_rest, new_indirect_dc, new_indirect_asg, new_indirect_rest, new_opacities, new_scaling, new_rotation, new_normal1, new_normal2, new_gs_feature=None):
         d = {"xyz": new_xyz,
              
         "refl_strength": new_refl_strength,    # #
@@ -829,6 +869,10 @@ class GaussianModel:
         "opacity": new_opacities,
         "scaling" : new_scaling,
         "rotation" : new_rotation}
+        if self._gs_feature is not None:
+            if new_gs_feature is None:
+                raise RuntimeError("new_gs_feature is required while joint feature is enabled")
+            d["gs_feature"] = new_gs_feature
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -851,6 +895,8 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        if self._gs_feature is not None:
+            self._gs_feature = optimizable_tensors["gs_feature"]
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -889,8 +935,9 @@ class GaussianModel:
         new_indirect_asg = self._indirect_asg[selected_pts_mask].repeat(N,1,1)
         
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        new_gs_feature = None if self._gs_feature is None else self._gs_feature[selected_pts_mask].repeat(N, 1)
 
-        self.densification_postfix(new_xyz, new_refl_strength, new_metalness, new_roughness, new_ori_color, new_diffuse_color, new_features_dc, new_features_rest, new_indirect_dc, new_indirect_asg, new_indirect_rest, new_opacity, new_scaling, new_rotation, new_normal1, new_normal2)
+        self.densification_postfix(new_xyz, new_refl_strength, new_metalness, new_roughness, new_ori_color, new_diffuse_color, new_features_dc, new_features_rest, new_indirect_dc, new_indirect_asg, new_indirect_rest, new_opacity, new_scaling, new_rotation, new_normal1, new_normal2, new_gs_feature)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -921,8 +968,9 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
+        new_gs_feature = None if self._gs_feature is None else self._gs_feature[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_refl_strength, new_metalness, new_roughness, new_ori_color, new_diffuse_color, new_features_dc, new_features_rest, new_indirect_dc, new_indirect_asg, new_indirect_rest, new_opacities, new_scaling, new_rotation, new_normal1, new_normal2)
+        self.densification_postfix(new_xyz, new_refl_strength, new_metalness, new_roughness, new_ori_color, new_diffuse_color, new_features_dc, new_features_rest, new_indirect_dc, new_indirect_asg, new_indirect_rest, new_opacities, new_scaling, new_rotation, new_normal1, new_normal2, new_gs_feature)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
         grads = self.xyz_gradient_accum / self.denom
@@ -960,5 +1008,3 @@ class GaussianModel:
         ply_path = os.path.join(model_path, f'test_{iteration:06d}.ply')
         mesh = o3d.io.read_triangle_mesh(ply_path)
         self.update_mesh(mesh)
-        
-    

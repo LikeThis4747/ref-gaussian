@@ -23,17 +23,21 @@ class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
+    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None,
+                 shuffle=True, resolution_scales=[1.0], load_model_path=None):
         """b
         :param path: Path to colmap scene main folder.
         """
         self.model_path = args.model_path
+        # [UPSTREAM Ref-Gaussian] af7691a scene/__init__.py::Scene
+        # [REF-MV MODIFICATION] Keep a loaded Ref baseline separate from joint output.
+        self.load_model_path = load_model_path or self.model_path
         self.loaded_iter = None
         self.gaussians = gaussians
 
         if load_iteration:
             if load_iteration == -1:
-                self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
+                self.loaded_iter = searchForMaxIteration(os.path.join(self.load_model_path, "point_cloud"))
             else:
                 self.loaded_iter = load_iteration
             print("Loading trained model at iteration {}".format(self.loaded_iter))
@@ -77,12 +81,12 @@ class Scene:
 
         if self.loaded_iter:
             if args.relight:
-                self.gaussians.load_ply(os.path.join(self.model_path,
+                self.gaussians.load_ply(os.path.join(self.load_model_path,
                                                             "point_cloud",
                                                             "iteration_" + str(self.loaded_iter),
                                                             "point_cloud.ply"), relight=True, args=args)
             else:
-                self.gaussians.load_ply(os.path.join(self.model_path,
+                self.gaussians.load_ply(os.path.join(self.load_model_path,
                                                             "point_cloud",
                                                             "iteration_" + str(self.loaded_iter),
                                                             "point_cloud.ply"), args=args)        

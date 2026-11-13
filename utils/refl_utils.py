@@ -1,12 +1,17 @@
 import torch
 import numpy as np
 import nvdiffrast.torch as dr
+from pathlib import Path
 from .general_utils import safe_normalize, flip_align_view
 from utils.sh_utils import eval_sh
 import kornia
 
 env_rayd1 = None
-FG_LUT = torch.from_numpy(np.fromfile("assets/bsdf_256_256.bin", dtype=np.float32).reshape(1, 256, 256, 2)).cuda()
+# [REF-MV MODIFICATION] Resolve the upstream asset relative to this checkout so
+# imports do not depend on the process working directory. LUT contents and use
+# are unchanged.
+_FG_LUT_PATH = Path(__file__).resolve().parents[1] / "assets" / "bsdf_256_256.bin"
+FG_LUT = torch.from_numpy(np.fromfile(_FG_LUT_PATH, dtype=np.float32).reshape(1, 256, 256, 2)).cuda()
 def init_envrayd1(H,W):
     i, j = np.meshgrid(
         np.linspace(-np.pi, np.pi, W, dtype=np.float32),
@@ -226,4 +231,3 @@ def get_full_color_volume_indirect(envmap: torch.Tensor, xyz, albedo, HWK, R, T,
 #     rays_d, _ = sample_camera_rays(HWK, R, T)
 #     rays_d, _ = reflection(rays_d, normal_map)
 #     return envmap(rays_d, mode="pure_env").permute(2,0,1)
-
