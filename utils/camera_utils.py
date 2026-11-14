@@ -12,12 +12,68 @@
 from scene.cameras import Camera
 import numpy as np
 import os, cv2, torch
+import torch.nn.functional as F
+from PIL import Image
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import fov2focal, focal2fov
 
 WARNED = False
 
-def loadCam(args, id, cam_info, resolution_scale):
+def _load_material_gt(cam_info, names, original_size, resize_resolution, final_resolution):
+    try:
+        import pyexr
+    except ImportError as exc:
+        raise ImportError("Material GT loss requires pyexr to read EXR files") from exc
+
+    dataset_root = os.path.dirname(os.path.dirname(cam_info.image_path))
+    split = os.path.basename(os.path.dirname(cam_info.image_path))
+    gt_root = os.path.join(dataset_root, "gt", split)
+    assert os.path.isdir(gt_root), f"Material GT directory does not exist: {gt_root}"
+
+    stem = cam_info.image_name
+    mask_path = os.path.join(gt_root, "mask", stem + ".png")
+    assert os.path.isfile(mask_path), f"Material GT mask does not exist: {mask_path}"
+    mask_array = np.asarray(Image.open(mask_path).convert("L"))
+    expected_shape = (original_size[1], original_size[0])
+    assert mask_array.shape == expected_shape, (
+        f"Material GT mask shape mismatch for {stem}: "
+        f"{mask_array.shape} vs {expected_shape}"
+    )
+    mask = torch.from_numpy(mask_array.copy()).float()[None, None] / 255.0
+
+    resize_hw = (resize_resolution[1], resize_resolution[0])
+    mask = F.interpolate(mask, size=resize_hw, mode="nearest")[0]
+    final_w, final_h = final_resolution
+    mask = mask[:, :final_h, :final_w] > 0.5
+
+    gt_maps = {}
+    scalar_names = {"metallic", "roughness", "depth"}
+    for name in names:
+        path = os.path.join(gt_root, name, stem + ".exr")
+        assert os.path.isfile(path), f"Enabled {name} GT does not exist: {path}"
+        array = pyexr.open(path).get()
+        if array.ndim == 2:
+            array = array[..., None]
+        channels = 1 if name in scalar_names else 3
+        assert array.shape[:2] == expected_shape and array.shape[2] >= channels, (
+            f"{name} GT shape mismatch for {stem}: got {array.shape}, "
+            f"expected HxWx{channels} at {expected_shape}"
+        )
+        value = torch.from_numpy(
+            np.ascontiguousarray(array[..., :channels], dtype=np.float32)
+        ).permute(2, 0, 1)[None]
+        value = F.interpolate(
+            value, size=resize_hw, mode="bilinear", align_corners=False
+        )[0, :, :final_h, :final_w]
+        if name == "normal":
+            # Blender camera space (Y up, Z back) -> Ref camera space (Y down, Z forward).
+            value[1:3].neg_()
+        gt_maps[name] = value
+
+    return gt_maps, mask
+
+
+def loadCam(args, id, cam_info, resolution_scale, load_material_gt=False):
     orig_w, orig_h = cam_info.image.size
 
     if args.resolution in [1, 2, 4, 8]:
@@ -44,6 +100,7 @@ def loadCam(args, id, cam_info, resolution_scale):
         K = cam_info.K.copy()
         K[:2] = K[:2] / scale
 
+    resize_resolution = resolution
     if len(cam_info.image.split()) > 3:
         import torch
         resized_image_rgb = torch.cat([PILtoTorch(im, resolution) for im in cam_info.image.split()[:3]], dim=0)
@@ -87,17 +144,30 @@ def loadCam(args, id, cam_info, resolution_scale):
         refl_msk = torch.tensor(refl_msk).permute(2,0,1).float()
     else: refl_msk = None
 
+    material_gt = None
+    material_gt_mask = None
+    gt_names = getattr(args, "material_gt_names", ())
+    if load_material_gt and gt_names:
+        material_gt, material_gt_mask = _load_material_gt(
+            cam_info,
+            gt_names,
+            (orig_w, orig_h),
+            resize_resolution,
+            resolution,
+        )
+
     return Camera(colmap_id=cam_info.uid, R=cam_info.R, T=cam_info.T, 
                   FoVx=fov_x, FoVy=fov_y,
                   image=gt_image, gt_alpha_mask=loaded_mask,
                   image_name=cam_info.image_name, uid=id, 
-                  data_device=args.data_device, HWK=HWK, gt_refl_mask=refl_msk)
+                  data_device=args.data_device, HWK=HWK, gt_refl_mask=refl_msk,
+                  material_gt=material_gt, material_gt_mask=material_gt_mask)
 
-def cameraList_from_camInfos(cam_infos, resolution_scale, args):
+def cameraList_from_camInfos(cam_infos, resolution_scale, args, load_material_gt=False):
     camera_list = []
 
     for id, c in enumerate(cam_infos):
-        camera_list.append(loadCam(args, id, c, resolution_scale))
+        camera_list.append(loadCam(args, id, c, resolution_scale, load_material_gt))
 
     return camera_list
 

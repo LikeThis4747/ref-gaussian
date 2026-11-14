@@ -80,6 +80,52 @@ def first_order_edge_aware_loss(data, img):
     return (spatial_gradient(data[None], order=1)[0].abs() * torch.exp(-spatial_gradient(img[None], order=1)[0].abs())).sum(1).mean()
 
 
+def calculate_material_gt_losses(viewpoint_camera, render_pkg, opt):
+    """Return enabled per-view GT losses without replacing rendered materials."""
+    losses = {}
+    gt_maps = viewpoint_camera.material_gt
+    mask = viewpoint_camera.material_gt_mask
+    map_keys = {
+        # Historical renderer key; its value is the active albedo tensor.
+        "albedo": "base_color_map",
+        "metallic": "refl_strength_map",
+        "roughness": "roughness_map",
+    }
+
+    for name in ("albedo", "metallic", "roughness", "normal", "depth"):
+        if not getattr(opt, f"use_gt_{name}_loss"):
+            continue
+        assert name in gt_maps and mask is not None, (
+            f"Camera {viewpoint_camera.image_name} is missing enabled {name} GT"
+        )
+
+        if name in map_keys:
+            # render_initial has no material maps; supervision starts with the material stages.
+            if map_keys[name] not in render_pkg:
+                continue
+            pred = render_pkg[map_keys[name]]
+            gt = gt_maps[name].to(pred)
+            loss_map = (pred - gt).square().mean(dim=0, keepdim=True)
+        elif name == "normal":
+            pred = F.normalize(render_pkg["rend_normal"], dim=0, eps=1e-6)
+            gt = F.normalize(gt_maps[name].to(pred), dim=0, eps=1e-6)
+            loss_map = 1.0 - (pred * gt).sum(dim=0, keepdim=True)
+        else:
+            pred = render_pkg["surf_depth"]
+            gt = gt_maps[name].to(pred)
+            loss_map = (pred - gt).abs()
+
+        valid = mask.to(loss_map.device)
+        valid = valid & torch.isfinite(gt).all(dim=0, keepdim=True)
+        valid = valid & (render_pkg["rend_alpha"] > 1e-6)
+        assert torch.any(valid), (
+            f"Camera {viewpoint_camera.image_name} has no valid pixels for {name} GT loss"
+        )
+        losses[name] = loss_map[valid].mean()
+
+    return losses
+
+
 
 def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
     tb_dict = {
@@ -135,6 +181,12 @@ def calculate_loss(viewpoint_camera, pc, render_pkg, opt, iteration):
         loss = loss + lambda_depth_smooth * loss_depth_smooth
     else:
         tb_dict["loss_depth_smooth"] = torch.zeros_like(loss)
+
+    gt_losses = calculate_material_gt_losses(viewpoint_camera, render_pkg, opt)
+    for name in ("albedo", "metallic", "roughness", "normal", "depth"):
+        gt_loss = gt_losses.get(name, torch.zeros_like(loss))
+        tb_dict[f"loss_gt_{name}"] = gt_loss
+        loss = loss + getattr(opt, f"lambda_gt_{name}") * gt_loss
 
     
     tb_dict["loss"] = loss.item()

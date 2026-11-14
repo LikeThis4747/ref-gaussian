@@ -51,6 +51,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
     TEST_INTERVAL = 1000
     MESH_EXTRACT_INTERVAL = 2000
 
+    gt_names = tuple(
+        name for name in ("albedo", "metallic", "roughness", "normal", "depth")
+        if getattr(opt, f"use_gt_{name}_loss")
+    )
+    for name in gt_names:
+        assert getattr(opt, f"lambda_gt_{name}") >= 0, (
+            f"lambda_gt_{name} must be non-negative"
+        )
+    # Scene camera loading uses this to load only explicitly enabled GT maps.
+    dataset.material_gt_names = gt_names
+
     # For real scenes
     USE_ENV_SCOPE = opt.use_env_scope  # False
     if USE_ENV_SCOPE:
@@ -446,6 +457,53 @@ def _material_vis_image(tensor, normal=False):
     return tensor[:3].clamp(0, 1).permute(1, 2, 0).cpu().numpy()
 
 
+def save_gt_material_training_vis(viewpoint_cam, render_pkg, opt, iteration):
+    names = [
+        name for name in ("albedo", "metallic", "roughness", "normal", "depth")
+        if getattr(opt, f"use_gt_{name}_loss")
+    ]
+    if not names:
+        return
+
+    map_keys = {
+        # Historical renderer key; keep the experiment terminology as albedo.
+        "albedo": "base_color_map",
+        "metallic": "refl_strength_map",
+        "roughness": "roughness_map",
+        "normal": "rend_normal",
+        "depth": "surf_depth",
+    }
+    images = []
+    for name in names:
+        gt = viewpoint_cam.material_gt[name].detach().float()
+        pred = render_pkg[map_keys[name]].detach().float()
+        if name == "normal":
+            gt = F.normalize(gt, dim=0, eps=1e-6) * 0.5 + 0.5
+            pred = F.normalize(pred, dim=0, eps=1e-6) * 0.5 + 0.5
+        elif name == "depth":
+            valid = viewpoint_cam.material_gt_mask
+            scale = gt[valid].max().clamp_min(1e-6)
+            gt = gt / scale
+            pred = pred / scale
+        if gt.shape[0] == 1:
+            gt = gt.repeat(3, 1, 1)
+            pred = pred.repeat(3, 1, 1)
+        images.extend([gt[:3].clamp(0, 1), pred[:3].clamp(0, 1)])
+
+    while len(images) % 4:
+        images.append(torch.zeros_like(images[0]))
+    grid = make_grid(torch.stack(images), nrow=4)
+    scale = max(grid.shape[-2] / 800, 1.0)
+    grid = F.interpolate(
+        grid[None],
+        (int(grid.shape[-2] / scale), int(grid.shape[-1] / scale)),
+    )[0]
+    save_image(
+        grid,
+        os.path.join(args.visualize_path, f"{iteration:06d}_material_gt.png"),
+    )
+
+
 def save_material_training_vis(
         viewpoint_cam, gaussians, background, pipe, opt, iteration,
         joint_output, joint_model, joint_cameras,
@@ -579,6 +637,18 @@ def save_training_vis(
     ):
     with torch.no_grad():
         render_pkg = render_fn(viewpoint_cam, gaussians, pipe, background, srgb=opt.srgb, opt=opt)
+
+        gt_material_names = [
+            name for name in ("albedo", "metallic", "roughness")
+            if getattr(opt, f"use_gt_{name}_loss")
+        ]
+        gt_render_pkg = render_pkg
+        if gt_material_names and "base_color_map" not in gt_render_pkg:
+            # Initial rendering has no material outputs; render them only for this snapshot.
+            gt_render_pkg = render_surfel(
+                viewpoint_cam, gaussians, pipe, background, srgb=opt.srgb, opt=opt
+            )
+        save_gt_material_training_vis(viewpoint_cam, gt_render_pkg, opt, iteration)
 
         error_map = torch.abs(viewpoint_cam.original_image.cuda() - render_pkg["render"])
 

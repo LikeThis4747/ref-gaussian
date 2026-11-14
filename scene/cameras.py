@@ -18,7 +18,8 @@ class Camera(nn.Module):
     def __init__(self, colmap_id, R, T, FoVx, FoVy, image, gt_alpha_mask,
                  image_name, uid,
                  trans=np.array([0.0, 0.0, 0.0]), scale=1.0, 
-                 data_device = "cuda", HWK = None, gt_refl_mask = None
+                 data_device = "cuda", HWK = None, gt_refl_mask = None,
+                 material_gt = None, material_gt_mask = None,
                  ):
         super(Camera, self).__init__()
 
@@ -37,6 +38,15 @@ class Camera(nn.Module):
             print(e)
             print(f"[Warning] Custom device {data_device} failed, fallback to default cuda device" )
             self.data_device = torch.device("cuda")
+
+        self.material_gt = {
+            name: value.to(self.data_device)
+            for name, value in (material_gt or {}).items()
+        }
+        self.material_gt_mask = (
+            None if material_gt_mask is None
+            else material_gt_mask.to(self.data_device)
+        )
 
         if HWK is not None: # #
             self.image_width = int(HWK[1])
@@ -84,4 +94,3 @@ class MiniCam:
         self.full_proj_transform = full_proj_transform
         view_inv = torch.inverse(self.world_view_transform)
         self.camera_center = view_inv[3][:3]
-

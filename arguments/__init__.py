@@ -128,6 +128,18 @@ class OptimizationParams(ParamGroup):
         self.lambda_normal_smooth = 0.0
         self.lambda_depth_smooth = 0.0
 
+        # Optional rendered-material supervision. Keep disabled unless explicitly requested.
+        self.use_gt_albedo_loss = False
+        self.use_gt_metallic_loss = False
+        self.use_gt_roughness_loss = False
+        self.use_gt_normal_loss = False
+        self.use_gt_depth_loss = False
+        self.lambda_gt_albedo = 0.1
+        self.lambda_gt_metallic = 0.1
+        self.lambda_gt_roughness = 0.1
+        self.lambda_gt_normal = 0.05
+        self.lambda_gt_depth = 0.01
+
 
         # initial values
         self.init_roughness_value = 0.1
